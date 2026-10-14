@@ -1,0 +1,8 @@
+{
+  "name": "AI Kiosk Civic Intelligence",
+  "description": "Multi-modal civic grievance intelligence and automated triage platform with Hinglish NLP, computer vision defect detection, spatio-temporal graph deduplication, dynamic hazard scoring, and GIS command center.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
