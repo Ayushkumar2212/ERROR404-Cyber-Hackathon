@@ -3,7 +3,9 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
-import { analyzeCivicPostText } from './src/utils/nlpTriage.js';
+import { analyzeCivicPostText, clusterIntoMasterTicket } from './src/utils/nlpTriage.js';
+import { INITIAL_CITIZEN_POSTS, INITIAL_MASTER_TICKETS } from './src/data/mockPosts.js';
+import { CitizenPost, MasterTicket } from './src/types/civic.js';
 
 dotenv.config();
 
@@ -14,6 +16,10 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
+
+// In-Memory Persistent Store on Server
+let masterTickets: MasterTicket[] = [...INITIAL_MASTER_TICKETS];
+let citizenPosts: CitizenPost[] = [...INITIAL_CITIZEN_POSTS];
 
 // Shared Gemini Client
 const ai = process.env.GEMINI_API_KEY
@@ -31,14 +37,37 @@ const ai = process.env.GEMINI_API_KEY
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'online',
-    platform: 'AI Kiosk Civic Intelligence',
-    version: '2.4.0-prod',
+    platform: 'Civic Kiosk — Municipal Grievance & Infrastructure Operations Platform',
+    version: '2.5.0-prod',
     geminiConnected: Boolean(process.env.GEMINI_API_KEY),
+    stats: {
+      activeMasterTickets: masterTickets.length,
+      totalCitizenPosts: citizenPosts.length,
+      resolvedTickets: masterTickets.filter((t) => t.status === 'RESOLVED_VERIFIED').length,
+    },
     models: {
       nlp: 'gemini-3.8-flash / IndicBERT-v3-Civic',
       cv: 'YOLOv11-CivicDefect-640 + pHash-64',
       graph: 'Neo4j Spatio-Temporal Graph Engine (100m, 72h)',
     },
+  });
+});
+
+// REST API: Get All Master Tickets
+app.get('/api/tickets', (req, res) => {
+  res.json({
+    success: true,
+    count: masterTickets.length,
+    tickets: masterTickets,
+  });
+});
+
+// REST API: Get All Citizen Grievance Posts
+app.get('/api/posts', (req, res) => {
+  res.json({
+    success: true,
+    count: citizenPosts.length,
+    posts: citizenPosts,
   });
 });
 
@@ -50,10 +79,10 @@ app.post('/api/triage', async (req, res) => {
     return res.status(400).json({ error: 'Text prompt is required.' });
   }
 
-  // Attempt server-side Gemini 3.8 Flash triage if API key is active
+  // Server-side Gemini 3.8 Flash triage if API key is active
   if (ai) {
     try {
-      const prompt = `You are the AI Kiosk Civic Intelligence Engine specializing in Indian municipal governance and code-mixed Hinglish/Hindi/English OSINT triage.
+      const prompt = `You are the Civic Kiosk Intelligence Engine specializing in Indian municipal governance and code-mixed Hinglish/Hindi/English OSINT triage.
 Analyze the following citizen social media post:
 "${text}"
 
@@ -131,7 +160,6 @@ Extract and evaluate:
       return res.json({ source: 'gemini-3.8-flash', result: parsed });
     } catch (err: any) {
       console.warn('Gemini triage fallback triggered:', err?.message || err);
-      // Fall through to deterministic triage
     }
   }
 
@@ -142,7 +170,7 @@ Extract and evaluate:
 
 // Computer Vision Defect Detection API
 app.post('/api/vision', async (req, res) => {
-  const { imageBase64, mimeType = 'image/jpeg', caption = '' } = req.body;
+  const { imageBase64, mimeType = 'image/jpeg' } = req.body;
 
   if (ai && imageBase64) {
     try {
@@ -157,7 +185,7 @@ app.post('/api/vision', async (req, res) => {
               },
             },
             {
-              text: `Analyze this municipal infrastructure image like an automated YOLOv11 Computer Vision Defect Detector for AI Kiosk.
+              text: `Analyze this municipal infrastructure image like an automated Computer Vision Defect Detector.
 Identify civic defects: "pothole", "garbage_dump", "waterlogging", "exposed_wire", "damaged_pole", or "sewage_leak".
 Return JSON with:
 - hasVisualProof: boolean
@@ -223,17 +251,103 @@ Return JSON with:
   });
 });
 
+// REST API: Ingest New Citizen Post and Auto-Cluster
+app.post('/api/ingest', (req, res) => {
+  const { post, masterTicket, isNewCluster } = req.body;
+
+  if (!post || !masterTicket) {
+    return res.status(400).json({ error: 'post and masterTicket are required' });
+  }
+
+  // Save to in-memory backend database
+  citizenPosts = [post, ...citizenPosts];
+
+  if (isNewCluster) {
+    masterTickets = [masterTicket, ...masterTickets];
+  } else {
+    masterTickets = masterTickets.map((t) => (t.id === masterTicket.id ? masterTicket : t));
+  }
+
+  res.json({
+    success: true,
+    message: isNewCluster ? 'Created new Master Ticket' : 'Merged into existing Master Ticket (+1 upvote)',
+    masterTicket,
+    totalTickets: masterTickets.length,
+    totalPosts: citizenPosts.length,
+  });
+});
+
+// REST API: Resolve Ticket and Save Verification Audit
+app.post('/api/resolve', async (req, res) => {
+  const { ticketId, evidence } = req.body;
+
+  if (!ticketId || !evidence) {
+    return res.status(400).json({ error: 'ticketId and evidence are required' });
+  }
+
+  const existing = masterTickets.find((t) => t.id === ticketId);
+  if (!existing) {
+    return res.status(404).json({ error: 'Ticket not found' });
+  }
+
+  // Generate bot reply if not already provided
+  let botReply = evidence.botReplyText;
+  if (!botReply) {
+    botReply = `Issue resolved under Municipal Ticket #${ticketId}. Field verification completed by ${existing.department} (Officer ${evidence.officerBadge || 'PAT-402'}). Site clear and restored. Thank you for reporting!`;
+  }
+
+  const updatedTicket: MasterTicket = {
+    ...existing,
+    status: 'RESOLVED_VERIFIED',
+    updatedAt: new Date().toISOString(),
+    resolutionEvidence: {
+      ...evidence,
+      resolvedAt: new Date().toISOString(),
+      botReplyDispatched: true,
+      botReplyText: botReply,
+    },
+  };
+
+  masterTickets = masterTickets.map((t) => (t.id === ticketId ? updatedTicket : t));
+
+  res.json({
+    success: true,
+    ticket: updatedTicket,
+    botReplyText: botReply,
+  });
+});
+
+// REST API: Spike Outbreak Simulator
+app.post('/api/spike', (req, res) => {
+  const { ticketId, count = 12 } = req.body;
+
+  const target = masterTickets.find((t) => t.id === ticketId);
+  if (!target) {
+    return res.status(404).json({ error: 'Ticket not found' });
+  }
+
+  target.citizenUpvotesCount += count;
+  target.updatedAt = new Date().toISOString();
+  target.priorityScore = Math.min(10, Math.round((target.priorityScore + 0.4) * 10) / 10);
+
+  res.json({
+    success: true,
+    ticket: target,
+    addedUpvotes: count,
+  });
+});
+
 // Closed-Loop Citizen Auto-Reply Bot Generator
 app.post('/api/dispatch-bot', async (req, res) => {
   const { ticketId, citizenHandle, department, landmark, resolutionNotes, officerBadge } = req.body;
 
-  let botReply = `Issue resolved under AI Kiosk Ticket #${ticketId || 'AK-9042'}. Field verification complete by ${department || 'Municipal Corporation'} (Badge: ${officerBadge || 'PAT-ENG-402'}). Site clear and restored. Thank you for reporting!`;
+  let botReply = `Issue resolved under Municipal Ticket #${ticketId || 'AK-9042'}. Field verification completed by ${department || 'Municipal Corporation'} (Badge: ${officerBadge || 'PAT-ENG-402'}). Site clear and restored. Thank you for reporting!`;
 
   if (ai) {
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
-        contents: `Generate a crisp, professional, polite automated citizen resolution tweet/reply from the municipal bot:
+        contents: `Generate a crisp, professional, polite automated citizen resolution reply from the municipal grievance desk:
 Ticket ID: #${ticketId}
 Citizen Handle: ${citizenHandle}
 Department: ${department}
@@ -275,7 +389,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[AI Kiosk Civic Intelligence] Server running at http://0.0.0.0:${PORT}`);
+    console.log(`[Civic Kiosk Platform] Backend server running at http://0.0.0.0:${PORT}`);
   });
 }
 
